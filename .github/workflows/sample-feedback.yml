@@ -75,11 +75,35 @@ jobs:
         run: |
           read passed total <<< "$(python3 -c "import json;c=json.load(open('grade-result.json'))['checks'];print(sum(1 for x in c if x['status']=='PASS'), len(c))" 2>/dev/null || echo '0 0')"
           result="${passed}/${total} questions passed"
+          if [ "$total" != "0" ] && [ "$passed" = "$total" ]; then marker="✅ PASS"; else marker="❌ FAIL"; fi
           details=$(python3 -c "import json;print('\n'.join('- %s: %s' % (x['name'], x['status']) for x in json.load(open('grade-result.json'))['checks']))" 2>/dev/null || echo "")
           notes=$(printf 'Advisory sample-test result only — NOT your official grade. %s.\n\n%s\n\nYour graded score is posted in Canvas.' "$result" "$details")
           tag="sample-${{ inputs.assignment }}-$(date -u +%Y%m%d%H%M%S)"
           # NOTE: grade-result.json is intentionally NOT attached (it contains points).
           gh release create "$tag" \
             --repo "${{ github.repository }}" \
-            --title "Sample feedback: ${{ inputs.assignment }} — ${result}" \
+            --title "Sample feedback: ${{ inputs.assignment }} — ${marker} (${result})" \
             --notes "$notes"
+
+      - name: Fail the run if any sample check did not pass
+        # Runs even though the publish step already created the advisory Release,
+        # so the ❌ still shows on the Actions run and on the commit while the
+        # student keeps their advisory Release. grade.py is informational (always
+        # exits 0); THIS is what turns the check red when a sample test fails.
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          try:
+              checks = json.load(open("grade-result.json"))["checks"]
+          except Exception as e:
+              print(f"::error::Could not read grade-result.json ({e}); marking run as failed.")
+              sys.exit(1)
+          failed = [c["name"] for c in checks if c["status"] != "PASS"]
+          if failed:
+              print("::error::Sample checks did not pass: " + ", ".join(failed) +
+                    ". This advisory run is marked failed so the ✗ shows on your commit — "
+                    "fix your queries and push again. (Your official grade still comes from Canvas.)")
+              sys.exit(1)
+          print("All sample checks passed ✔")
+          PY

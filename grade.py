@@ -98,7 +98,10 @@ def main():
             rows.append((name, "MISSING", 0.0, weight))
             continue
 
-        res = run_psql(["--csv", "-t"], student_sql)
+        # -q suppresses psql command tags (DROP TABLE / CREATE TABLE), which appear
+        # when an answer file contains DDL. check.py uses -q too, so the local
+        # self-check and the official grade see byte-identical output.
+        res = run_psql(["-q", "--csv", "-t"], student_sql)
         if res.returncode != 0:
             rows.append((name, "ERROR", 0.0, weight))
             continue
