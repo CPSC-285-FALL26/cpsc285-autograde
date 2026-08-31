@@ -21,7 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # Must match the PostgreSQL version students install (Setup step 2 specifies 18).
+        # information_schema.check_constraints.check_clause is parenthesized differently
+        # in 16 and 18, and HW2 q1/q2 compare that string, so a mismatch here makes a
+        # correct answer pass check.py locally and fail the official grade.
+        image: postgres:18
         env:
           POSTGRES_USER: grader
           POSTGRES_PASSWORD: grader
@@ -52,8 +56,18 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install psql client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Install psql 18 client
+        # The runner's default postgresql-client is 16; pull 18 from PGDG so the
+        # client matches the server above and the students' own machines.
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-18
+          psql --version
 
       - name: Reshape public sample into grader layout
         run: |
