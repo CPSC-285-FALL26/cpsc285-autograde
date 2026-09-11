@@ -9,6 +9,7 @@ __pycache__/
 
 # Generated at runtime by the reusable workflow (reshaped on the runner — never commit)
 grade-result.json
+sample-feedback.md
 submission/
 tests/
 *.sqlite

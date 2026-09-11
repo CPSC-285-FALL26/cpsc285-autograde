@@ -86,18 +86,24 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+        # grade.py writes sample-feedback.md: the pass count, the per-question
+        # list, and for each failure the rows that were expected but not
+        # returned and vice versa. Passing it with --notes-file rather than
+        # building the body in bash keeps the student's own query output (which
+        # contains commas, quotes and backticks) out of shell interpolation.
         run: |
           read passed total <<< "$(python3 -c "import json;c=json.load(open('grade-result.json'))['checks'];print(sum(1 for x in c if x['status']=='PASS'), len(c))" 2>/dev/null || echo '0 0')"
           result="${passed}/${total} questions passed"
           if [ "$total" != "0" ] && [ "$passed" = "$total" ]; then marker="✅ PASS"; else marker="❌ FAIL"; fi
-          details=$(python3 -c "import json;print('\n'.join('- %s: %s' % (x['name'], x['status']) for x in json.load(open('grade-result.json'))['checks']))" 2>/dev/null || echo "")
-          notes=$(printf 'Advisory sample-test result only — NOT your official grade. %s.\n\n%s\n\nYour graded score is posted in Canvas.' "$result" "$details")
+          if [ ! -s sample-feedback.md ]; then
+            printf 'The advisory run did not produce a result (setup error). Check the Actions log.\n' > sample-feedback.md
+          fi
           tag="sample-${{ inputs.assignment }}-$(date -u +%Y%m%d%H%M%S)"
           # NOTE: grade-result.json is intentionally NOT attached (it contains points).
           gh release create "$tag" \
             --repo "${{ github.repository }}" \
             --title "Sample feedback: ${{ inputs.assignment }} — ${marker} (${result})" \
-            --notes "$notes"
+            --notes-file sample-feedback.md
 
       - name: Fail the run if any sample check did not pass
         # Runs even though the publish step already created the advisory Release,
@@ -118,6 +124,26 @@ jobs:
               print("::error::Sample checks did not pass: " + ", ".join(failed) +
                     ". This advisory run is marked failed so the ✗ shows on your commit — "
                     "fix your queries and push again. (Your official grade still comes from Canvas.)")
+              # One annotation per failure with the actual difference, so the
+              # reason is visible on the run page without opening the Release.
+              for c in checks:
+                  if c["status"] == "PASS":
+                      continue
+                  d = c.get("detail") or {}
+                  kind = d.get("kind")
+                  if kind == "error":
+                      why = "the query did not run: " + d.get("message", "").splitlines()[0]
+                  elif kind == "missing":
+                      why = f"no file at {d.get('path','')}"
+                  elif kind == "order":
+                      why = (f"right rows, wrong order (differs from row "
+                             f"{d.get('first_diff_index', 0) + 1}) — check the ORDER BY")
+                  else:
+                      why = (f"returned {d.get('got_rows', 0)} rows, expected "
+                             f"{d.get('expected_rows', 0)}; {d.get('missing_total', 0)} missing, "
+                             f"{d.get('extra_total', 0)} unexpected")
+                  print(f"::error title={c['name']} {c['status']}::{c['name']}: {why}")
+              print("Full row-by-row detail is in the job summary and in the advisory Release.")
               sys.exit(1)
           print("All sample checks passed ✔")
           PY
