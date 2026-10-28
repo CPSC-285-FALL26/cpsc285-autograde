@@ -2,8 +2,9 @@ name: Sample feedback (advisory)
 
 # Reusable workflow that student repos call on push. It grades ONLY the public
 # sample tests that live in the student's own repo (hwN/schema.sql +
-# hwN/sample/expected_*.csv), so there is no secret to protect and tampering is
-# harmless. It publishes the result as an advisory Release on the student repo.
+# hwN/sample/expected_*.csv for SQL assignments; hwN/sample/expected.json and the
+# hwN/*_checks.py engine for Python ones, HW6 on), so there is no secret to protect
+# and tampering is harmless. It publishes the result as an advisory Release on the student repo.
 # THIS IS NOT THE OFFICIAL GRADE — that is computed by the private grader repo.
 
 on:
@@ -56,6 +57,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install psycopg (Python assignments)
+        if: hashFiles(format('submission/{0}/sample/expected.json', inputs.assignment)) != ''
+        run: pip install "psycopg[binary]"
+
       - name: Install psql 18 client
         # The runner's default postgresql-client is 16; pull 18 from PGDG so the
         # client matches the server above and the students' own machines.
@@ -74,10 +79,37 @@ jobs:
           HW="${{ inputs.assignment }}"
           mkdir -p "tests/$HW/expected"
           cp "submission/$HW/schema.sql" "tests/$HW/setup.sql"
-          for f in submission/$HW/sample/expected_*.csv; do
-            base="$(basename "$f" .csv)"; q="${base#expected_}"
-            cp "$f" "tests/$HW/expected/$q.csv"
-          done
+          if [ -f "submission/$HW/sample/expected.json" ]; then
+            # Python assignment (HW6 on): one JSON of sample answers, the *_checks.py
+            # engine from the student's folder, and a points.json "python" block that
+            # tells grade.py which file is the student's module. No points are shown.
+            python3 - "$HW" <<'PY'
+          import json, re, shutil, sys
+          from pathlib import Path
+          hw = sys.argv[1]
+          sub, tests = Path("submission") / hw, Path("tests") / hw
+          engines = sorted(sub.glob("*_checks.py"))
+          modules = [f for f in sorted(sub.glob("*.py"))
+                     if not f.name.endswith("_checks.py") and not f.name.startswith("check")]
+          if len(engines) != 1 or len(modules) != 1:
+              print(f"::error::{hw}/ should hold one *_checks.py and one module to test; "
+                    f"found {[f.name for f in engines]} and {[f.name for f in modules]}")
+              sys.exit(1)
+          shutil.copy(engines[0], tests / engines[0].name)
+          shutil.copy(sub / "sample" / "expected.json", tests / "expected.json")
+          names = sorted(json.loads((tests / "expected.json").read_text()),
+                         key=lambda n: int(re.sub(r"\D", "", n) or 0))
+          (tests / "points.json").write_text(json.dumps({"python": {
+              "checks": engines[0].name, "module": modules[0].name,
+              "expected": "expected.json", "names": names}}))
+          print(f"Python checks: {engines[0].name} on {modules[0].name}, {', '.join(names)}")
+          PY
+          else
+            for f in submission/$HW/sample/expected_*.csv; do
+              base="$(basename "$f" .csv)"; q="${base#expected_}"
+              cp "$f" "tests/$HW/expected/$q.csv"
+            done
+          fi
 
       - name: Run sample autograder
         run: python3 runner/grade.py --assignment "${{ inputs.assignment }}" --submission submission --tests tests --no-points
@@ -135,6 +167,8 @@ jobs:
                       why = "the query did not run: " + d.get("message", "").splitlines()[0]
                   elif kind == "missing":
                       why = f"no file at {d.get('path','')}"
+                  elif kind == "python":
+                      why = (d.get("message", "").strip().splitlines() or ["did not pass"])[0]
                   elif kind == "order":
                       why = (f"right rows, wrong order (differs from row "
                              f"{d.get('first_diff_index', 0) + 1}) — check the ORDER BY")

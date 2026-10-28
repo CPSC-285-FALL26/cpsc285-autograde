@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sample / advisory SQL autograder for CPSC 285 (self-run GitHub org model).
+Sample / advisory autograder for CPSC 285 (SQL assignments, and Python ones from HW6) (self-run GitHub org model).
 
 Runs a setup.sql to build a throwaway database, then executes each student query
 file (q1.sql, q2.sql, ...) from the student's submission folder and compares its
@@ -47,6 +47,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -158,6 +159,21 @@ def failure_markdown(check, level="full"):
             out.append("```\n" + d.get("message", "") + "\n```\n")
         return "\n".join(out)
 
+    if kind == "python":
+        if level == "counts":
+            out.append("The function did not pass this check.\n")
+        else:
+            out.append("```\n" + d.get("message", "") + "\n```\n")
+        return "\n".join(out)
+
+    if kind == "error":
+        if level == "counts":
+            out.append("The query did not run (SQL error).\n")
+        else:
+            out.append("The query did not run:\n")
+            out.append("```\n" + d.get("message", "") + "\n```\n")
+        return "\n".join(out)
+
     if kind == "order":
         out.append(
             f"Right rows, wrong order. Returned {d.get('got_rows', 0)} rows, all of them "
@@ -207,6 +223,46 @@ def failure_markdown(check, level="full"):
     return "\n".join(out)
 
 
+def run_python_checks(tests_dir, sub_dir, cfg):
+    """Python assignments (HW6 on): points.json carries a "python" block naming the
+    check engine in tests/<hw>/, the student's module, and the expected-answer JSON.
+
+    The student's code runs in a CHILD process whose environment holds only the
+    PG* connection variables, so it cannot read GRADING_TOKEN or any other secret
+    the workflow put in os.environ. Returns rows in the same shape as the SQL path:
+    (name, status, earned, weight, detail)."""
+    py = cfg["python"]
+    out = Path(tempfile.mkdtemp()) / "py-results.json"
+    runner = (
+        "import json, os, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import importlib; chk = importlib.import_module(sys.argv[2])\n"
+        "kw = {k: os.environ[v] for k, v in [('host','PGHOST'),('port','PGPORT'),('user','PGUSER'),"
+        "('password','PGPASSWORD'),('dbname','PGDATABASE')] if os.environ.get(v)}\n"
+        "res = chk.run_all(sys.argv[3], sys.argv[4], sys.argv[5], kw)\n"
+        "open(sys.argv[6], 'w').write(json.dumps(res))\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k.startswith("PG") or k in ("PATH", "HOME", "LANG")}
+    r = subprocess.run(
+        [sys.executable, "-c", runner, str(tests_dir.resolve()), Path(py["checks"]).stem,
+         str((sub_dir / py["module"]).resolve()), str((tests_dir / "setup.sql").resolve()),
+         str((tests_dir / py["expected"]).resolve()), str(out)],
+        capture_output=True, text=True, env=env, cwd=out.parent, timeout=300)
+    names = py["names"]
+    if r.returncode != 0 or not out.exists():
+        msg = (r.stderr or r.stdout or "the check runner produced no result").strip()[-1500:]
+        return [(n, "ERROR", 0.0, 0.0, {"kind": "python", "message": msg}) for n in names]
+    rows = []
+    for c in json.loads(out.read_text()):
+        if c["status"] == "PASS":
+            rows.append((c["name"], "PASS", None, None, None))
+        elif c["status"] == "MISSING":
+            rows.append((c["name"], "MISSING", None, None, {"kind": "missing", "path": py["module"]}))
+        else:
+            rows.append((c["name"], c["status"], None, None, {"kind": "python", "message": c["message"]}))
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--assignment", required=True, help="assignment folder, e.g. hw1")
@@ -242,12 +298,22 @@ def main():
     ordered_checks = set(cfg.get("ordered", []))
     default_points = float(cfg.get("default", 1))
 
-    checks = sorted(expected_dir.glob("*.csv"))
-    if not checks:
-        print("::error::No expected/*.csv checks found for this assignment")
-        sys.exit(1)
-
     total, max_total, rows = 0.0, 0.0, []
+
+    if "python" in cfg:
+        # Python assignment: same scoring and reporting, different checker.
+        for name, status, _, _, detail in run_python_checks(tests_dir, sub_dir, cfg):
+            weight = float(points.get(name, default_points))
+            max_total += weight
+            earned = weight if status == "PASS" else 0.0
+            total += earned
+            rows.append((name, status, earned, weight, detail))
+        checks = []
+    else:
+        checks = sorted(expected_dir.glob("*.csv"))
+        if not checks:
+            print("::error::No expected/*.csv checks found for this assignment")
+            sys.exit(1)
 
     for exp in checks:
         name = exp.stem                      # e.g. "q1"
